@@ -1,9 +1,12 @@
 """
-    tmux list-s && (tmux list-p -aF "#S;#I;#P;#W;#{pane_current_path}" >| ~/tmux_state.txt)
+Read a tmux_state.txt file and generate a script to recreate that tmux instance
 """
+
 from collections import namedtuple
 import os
 
+# TODO: determine these first indices programaticaly
+#
 # Note: these are not standard, and can be set with "set -g base-index 1" or
 # "set -g pane-base-index 1" in .tmux.conf
 FIRST_WINDOW_INDEX = 1
@@ -32,7 +35,7 @@ def read_state_file(state_file: str = "~/tmux_state.txt") -> dict:
 
         tmux list-p -aF "#S;#I;#P;#W;#{pane_current_path};#{pane_pid}" | tee /tmp/.tmux1 | cut -d\; -f6 | xargs -I{} -n1 bash -c 'ps -hoargs --ppid {} || echo' >| /tmp/.tmux2; paste -d\; /tmp/.tmux? >| ~/tmux_state.txt
 
-    and geneate a tmux_state dict (session -> list-of-windows -> list-of-panes).
+    and generate a tmux_state dict (session -> list-of-windows -> list-of-panes).
 
     Example input file:
         scorpius;1;1;gcloud;/home/kester/Dropbox/export/apple_health_export;4136;
