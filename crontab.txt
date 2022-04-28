@@ -1,0 +1,22 @@
+#  m   h  dom mon dow   command
+   40  *  *   *   *     tmux list-s && (tmux list-p -aF "#S;#I;#P;#W;#{pane_current_path};#{pane_pid}" | tee /tmp/.tmux1 | cut -d\; -f6 | xargs -I{} -n1 bash -c 'ps -hoargs --ppid {} || echo' >| /tmp/.tmux2; paste -d\; /tmp/.tmux? >| ~/tmux_state.txt)
+
+# The tmux list-s lists all tmux sessions currently running. If there aren't any, nothing else happens.
+# If there is one or more tmux sessions running, each pane is listed with 
+#     * session name
+#     * window index
+#     * pane index
+#     * window name
+#     * the current working directory in the pane
+#     * the ID of the process running in the pane, if there is one, otherwise an empty string
+#
+# This tmux pane listing is tee-ed to a tmpfile, and STDOUT is then used to
+# extract just the running-process ID, and pipe that through 'ps -oargs' (the
+# -h suppresses header printing) to get the actual command that is being run.
+# THIS text is then put in a second tmpfile, and the two tmpfiles are pasted
+# together columnwise to create a sing file.
+#
+# TODO: there's probably a ps flag that would print an empty line, which would
+# remove the need for the bash call to '|| echo;
+#
+
