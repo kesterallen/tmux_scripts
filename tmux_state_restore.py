@@ -5,7 +5,8 @@ Read a tmux_state.txt file and generate a script to recreate that tmux instance
 from collections import namedtuple
 import os
 
-# TODO: determine these first indices programaticaly
+# TODO: determine these first indices programaticaly, or enumerate the loops
+#     that use them and use that enumeration value > 0 for the same purpose
 #
 # Note: these are not standard, and can be set with "set -g base-index 1" or
 # "set -g pane-base-index 1" in .tmux.conf
