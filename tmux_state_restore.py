@@ -5,14 +5,6 @@ Read a tmux_state.txt file and generate a script to recreate that tmux instance
 from collections import namedtuple
 import os
 
-# TODO: determine these first indices programaticaly, or enumerate the loops
-#     that use them and use that enumeration value > 0 for the same purpose
-#
-# Note: these are not standard, and can be set with "set -g base-index 1" or
-# "set -g pane-base-index 1" in .tmux.conf
-FIRST_WINDOW_INDEX = 1
-FIRST_PANE_INDEX = 1
-
 Window = namedtuple("Window", "index name panes")
 Pane = namedtuple("Pane", "index cwd cmd")
 
@@ -83,14 +75,14 @@ def main():
     for session_name, windows in state.items():
         cmds.append(f"new-session -s {session_name} -d")
 
-        for window in windows:
-            for pane in window.panes:
+        for iwin, window in enumerate(windows):
+            for ipane, pane in enumerate(window.panes):
 
                 # If a window contains multiple panes, create an additional pane here:
-                if pane.index > FIRST_PANE_INDEX:
+                if ipane > 0:
                     cmd = "split-window -h"
                 # Rename the inital window created at session start
-                elif window.index == FIRST_WINDOW_INDEX:
+                elif iwin == 0:
                     cmd = f"""rename-window "{window.name}" """
                 # For the first pane of a new window, make the window, implicitly creating the pane
                 else:
