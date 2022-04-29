@@ -5,21 +5,14 @@ Read a tmux_state.txt file and generate a script to recreate that tmux instance
 from collections import namedtuple
 import os
 
-Window = namedtuple("Window", "index name panes")
-Pane = namedtuple("Pane", "index cwd cmd")
+Pane = namedtuple("Pane", "index window_index window_name cwd cmd")
 
 
-def _sorted_windows(windows):
+def _sorted_panes(panes):
     """
-    Convert index-to-window dict to a list of windows sorted by window index,
-    with each window's panes sorted by pane index.
+    Sort the list of panes by window index and then pane index.
     """
-    sorted_windows = []
-    for window in sorted(windows.values(), key=lambda w: w.index):
-        sorted_panes = sorted(window.panes, key=lambda p: p.index)
-        sorted_window = Window(window.index, window.name, sorted_panes)
-        sorted_windows.append(sorted_window)
-    return sorted_windows
+    return sorted(panes, key=lambda p: (p.window_index, p.index))
 
 
 def read_state_file(state_file: str = "~/tmux_state.txt") -> dict:
@@ -50,49 +43,49 @@ def read_state_file(state_file: str = "~/tmux_state.txt") -> dict:
     state = {}
     for row in rows:
         (session, window_index, pane_index, window_name, cwd, pid, cmd) = row.split(";")
-        window = Window(int(window_index), window_name, [])
-        pane = Pane(int(pane_index), cwd, cmd)
 
-        # Add a new session
+        # If this is a new session, add it:
         if session not in state:
-            state[session] = {}
+            state[session] = []
 
-        # Add a new window to a session
-        if window.index not in state[session]:
-            state[session][window.index] = window
-
-        # Add a pane to the current window
-        state[session][window.index].panes.append(pane)
+        # Add this pane to its session
+        pane = Pane(int(pane_index), int(window_index), window_name, cwd, cmd)
+        if pane.window_index not in state[session]:
+            state[session].append(pane)
 
     # Convert index-to-window dict to a list of windows sorted by window index
-    return {s: _sorted_windows(ws) for s, ws in state.items()}
+    return {s: _sorted_panes(ps) for s, ps in state.items()}
 
 
 def main():
     """Read the state file and generate the recreate-the-state bash script."""
     cmds = []
     state = read_state_file()
-    for session_name, windows in state.items():
+    for session_name, panes in state.items():
         cmds.append(f"new-session -s {session_name} -d")
 
-        for iwin, window in enumerate(windows):
-            for ipane, pane in enumerate(window.panes):
+        for ip, pane in enumerate(panes):
+            # The pane should be split if its window index is different from
+            # the previous pane's. This relies on the fact that the panes list
+            # is sorted.
+            is_split_pane = ip > 0 and pane.window_index == panes[ip - 1].window_index
+            is_first_window = ip == 0
 
-                # If a window contains multiple panes, create an additional pane here:
-                if ipane > 0:
-                    cmd = "split-window -h"
-                # Rename the inital window created at session start
-                elif iwin == 0:
-                    cmd = f"""rename-window "{window.name}" """
-                # For the first pane of a new window, make the window, implicitly creating the pane
-                else:
-                    cmd = f"""new-window -n "{window.name}" -t "{session_name}" """
-                cmds.append(cmd)
+            # Rename the inital window created at session start
+            if is_first_window:
+                cmd = f"""rename-window "{pane.window_name}" """
+            # If a window contains multiple panes, create an additional pane here:
+            elif is_split_pane:
+                cmd = "split-window -h"
+            # For the first pane of a new window, make the window, implicitly creating the pane
+            else:
+                cmd = f"""new-window -n "{pane.window_name}" -t "{session_name}" """
+            cmds.append(cmd)
 
-                sendkeys_args = f"""-t "{session_name}:{window.name}" """
-                cmds.append(f'send-keys {sendkeys_args} "cd {pane.cwd}" C-m')
-                if pane.cmd:
-                    cmds.append(f'send-keys {sendkeys_args} "{pane.cmd}" C-m')
+            sendkeys_args = f"""-t "{session_name}:{pane.window_name}" """
+            cmds.append(f'send-keys {sendkeys_args} "cd {pane.cwd}" C-m')
+            if pane.cmd:
+                cmds.append(f'send-keys {sendkeys_args} "{pane.cmd}" C-m')
 
     print("\n".join([f"tmux {c}" for c in cmds]))
 
