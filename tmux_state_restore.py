@@ -61,9 +61,10 @@ def main():
         for ipane, pane in enumerate(panes):
             # The pane should be split if its window index is different from
             # the previous pane's. This relies on the fact that the panes list
-            # is sorted. The first pane can't be a split pane.
-            is_split_pane = ipane > 0 and pane.window_index == panes[ipane - 1].window_index
+            # is sorted. The first pane can't be a split pane, and a split pane
+            # doesn't rename the window, so an if/elif/else is used here.
             is_first_window = ipane == 0
+            is_split_pane = ipane > 0 and pane.window_index == panes[ipane - 1].window_index
 
             # Rename the inital window created at session start
             if is_first_window:
@@ -81,6 +82,7 @@ def main():
             if pane.cmd:
                 cmds.append(f'send-keys {sendkeys_args} "{pane.cmd}" C-m')
 
+    cmds.append(f"attach -t {session_name}")
     print("\n".join([f"tmux {c}" for c in cmds]))
 
 
