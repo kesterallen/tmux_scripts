@@ -65,7 +65,7 @@ def main():
     commands = []
     state = read_state_file()
     for session, panes in state.items():
-        commands.append(f"new-session -s {session} -d")
+        commands.append(f"""new-session -s "{session}" -d""")
 
         for ipane, pane in enumerate(panes):
             # The pane should be split if its window index is different from
@@ -92,7 +92,7 @@ def main():
             commands.append(f'send-keys {sendkeys_args} "cd {pane.cwd}" C-m')
             if pane.command:
                 commands.append(f'send-keys {sendkeys_args} "{pane.command}" C-m')
-    commands.append(f"attach -t {session}")
+    commands.append(f"""attach -t "{session}" """)
 
     for command in commands:
         print(f"tmux {command}")
