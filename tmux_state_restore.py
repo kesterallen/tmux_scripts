@@ -72,7 +72,10 @@ def main():
     """Read the state file and generate the recreate-the-state bash script."""
     tmux_commands = []
 
-    state_file = sys.argv[1] if len(sys.argv) > 0 else DEFAULT_STATE_FILE
+    if len(sys.argv) > 1:
+        state_file = sys.argv[1]
+    else:
+        state_file = DEFAULT_STATE_FILE
     state = read_state_file(state_file)
 
     if not state:
