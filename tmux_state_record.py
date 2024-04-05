@@ -1,4 +1,4 @@
-
+# pylint: disable=line-too-long,anomalous-backslash-in-string
 """
 Take the output from 
     tmux list-p -aF "#S;#I;#P;#W;#{pane_current_path};#{pane_pid}" 
@@ -50,11 +50,22 @@ But now by this script:
 import subprocess
 import sys
 
-for line in sys.stdin:
-    line = line.rstrip()
-    ppid = line.split(";")[-1]
-    command = ["ps", "-hoargs", "--ppid", ppid]
-    # Grab only first PID output if there are multiple, e.g. one or more suspended jobs in the pane
-    result = subprocess.run(command, capture_output=True).stdout.decode("utf-8").rstrip().split("\n")[0]
-    print(";".join([line, result]))
+OUTPUT_COMMAND_INDEX = -1 #?
 
+
+def main():
+    """Append the command to the tmux state"""
+    for line in sys.stdin:
+        line = line.rstrip()
+        ppid = line.split(";")[-1]
+        ps_command = ["ps", "-hoargs", "--ppid", ppid]
+        ps_output = subprocess.run(ps_command, capture_output=True, check=False)
+        # Grab only most recent PID output if there are multiple PIDs for this
+        # pane, e.g. one or more suspended jobs in the pane
+        output_commands = ps_output.stdout.decode("utf-8").rstrip().split("\n")
+        output_command = output_commands[OUTPUT_COMMAND_INDEX]
+        print(";".join([line, output_command]))
+
+
+if __name__ == "__main__":
+    main()
