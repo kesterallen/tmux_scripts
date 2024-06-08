@@ -1,7 +1,7 @@
 # pylint: disable=line-too-long,anomalous-backslash-in-string
 """
-Take the output from 
-    tmux list-p -aF "#S;#I;#P;#W;#{pane_current_path};#{pane_pid}" 
+Take the output from
+    tmux list-p -aF "#S;#I;#P;#W;#{pane_current_path};#{pane_pid}"
 
 e.g.:
     scorpius;1;1;gcloud;/home/kester/Dropbox/gcloud/projects/sf_p3;4190
@@ -50,8 +50,6 @@ But now by this script:
 import subprocess
 import sys
 
-OUTPUT_COMMAND_INDEX = -1 #?
-
 
 def main():
     """Append the command to the tmux state"""
@@ -60,11 +58,12 @@ def main():
         ppid = line.split(";")[-1]
         ps_command = ["ps", "-hoargs", "--ppid", ppid]
         ps_output = subprocess.run(ps_command, capture_output=True, check=False)
-        # Grab only most recent PID output if there are multiple PIDs for this
-        # pane, e.g. one or more suspended jobs in the pane
+        # Handle suspended jobs in the pane (multiple PIDs in the pane):
         output_commands = ps_output.stdout.decode("utf-8").rstrip().split("\n")
-        output_command = output_commands[OUTPUT_COMMAND_INDEX]
-        print(";".join([line, output_command]))
+        for i, output_command in enumerate(reversed(output_commands)):
+            if len(output_commands) > 1 and i > 0:
+                output_command += " &"
+            print(";".join([line, output_command]))
 
 
 if __name__ == "__main__":

@@ -83,6 +83,8 @@ def main():
         return
 
     for session, panes in state.items():
+        # If a session already exists, exit with a warning
+        tmux_commands.append(f"""has-session -t "{session}" && echo "session '{session}' already exists, quitting" && exit 1""")
         tmux_commands.append(f"""new-session -s "{session}" -d""")
 
         for ipane, pane in enumerate(panes):
@@ -100,7 +102,7 @@ def main():
                 prev_pane = panes[ipane - 1]
                 is_split_pane = pane.window_index == prev_pane.window_index
                 if is_split_pane:
-                    tmux_command = "split-window -h"
+                    tmux_command = "split-window -h" # TODO: add a '-t "wsl tmux:bash"' before the -h to target the correct window? Necessary if attached, but session is not attached yet
                 # For the first pane of a new window, make the window,
                 # implicitly creating the first pane:
                 else:
