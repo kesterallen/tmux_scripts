@@ -11,7 +11,7 @@ DEFAULT_STATE_FILE = "~/tmux_state.txt"
 Pane = namedtuple("Pane", "index window_index window_name cwd command session")
 
 
-def row_to_pane(row: list) -> Pane:
+def row_to_pane(row: str) -> Pane:
     """Make a Pane from a row in the state file"""
     # unpack row, discard process ID from 6th element
     (session, window_index, pane_index, window_name, cwd, _, command) = row.split(";")
@@ -68,7 +68,7 @@ def read_state_file(state_file: str = DEFAULT_STATE_FILE) -> dict:
     return state
 
 
-def main():
+def main() -> None:
     """Read the state file and generate the recreate-the-state bash script."""
     tmux_commands = []
 
@@ -84,7 +84,8 @@ def main():
 
     for session, panes in state.items():
         # If a session already exists, exit with a warning
-        tmux_commands.append(f"""has-session -t "{session}" && echo "session '{session}' already exists, quitting" && exit 1""")
+        warning = f"session '{session}' already exists, quitting"
+        tmux_commands.append(f"""has-session -t "{session}" && echo "{warning}" && exit 1""")
         tmux_commands.append(f"""new-session -s "{session}" -d""")
 
         for ipane, pane in enumerate(panes):
@@ -96,24 +97,24 @@ def main():
 
             # Rename the inital window created at session start
             if is_first_window:
-                tmux_command = f"""rename-window "{pane.window_name}" """
+                tmux_command = f'rename-window "{pane.window_name}"'
             else:
                 # If a window contains multiple panes, create an additional pane here:
                 prev_pane = panes[ipane - 1]
                 is_split_pane = pane.window_index == prev_pane.window_index
                 if is_split_pane:
-                    tmux_command = "split-window -h" # TODO: add a '-t "wsl tmux:bash"' before the -h to target the correct window? Necessary if attached, but session is not attached yet
+                    tmux_command = "split-window -h"  # TODO: weigh pros/cons of adding a '-t "wsl tmux:bash"' before the -h to target the correct window? Necessary if attached, but session is not attached yet
                 # For the first pane of a new window, make the window,
-                # implicitly creating the first pane:
+                # which implicitly creates the first pane:
                 else:
-                    tmux_command = f"""new-window -n "{pane.window_name}" -t "{session}" """
+                    tmux_command = f'new-window -n "{pane.window_name}" -t "{session}"'
             tmux_commands.append(tmux_command)
 
-            sendkeys_args = f"""-t "{session}:{pane.window_name}" """
-            tmux_commands.append(f'send-keys {sendkeys_args} "cd \'{pane.cwd}\'" C-m')
+            sendkeys_args = f'-t "{session}:{pane.window_name}"'
+            tmux_commands.append(f"""send-keys {sendkeys_args} "cd '{pane.cwd}'" C-m""")
             if pane.command:
                 tmux_commands.append(f'send-keys {sendkeys_args} "{pane.command}" C-m')
-    tmux_commands.append(f"""attach -t "{session}" """)
+    tmux_commands.append(f'attach -t "{session}"')
 
     for tmux_command in tmux_commands:
         print(f"tmux {tmux_command}")
