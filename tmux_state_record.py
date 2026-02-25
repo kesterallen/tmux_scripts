@@ -80,7 +80,8 @@ def main():
     """Append the command to the tmux state"""
     for line in sys.stdin:
         pane_info = line.rstrip().split(SPLIT_CHAR)
-        command_from_ppid(ppid=pane_info[-1])
+        command = command_from_ppid(ppid=pane_info[-1])
+        pane_info.append(command)
         line = list_to_csv_str(pane_info)
         print(line)
 
