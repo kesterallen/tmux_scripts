@@ -5,6 +5,9 @@ Read a tmux_state.txt file and generate a script to recreate that tmux instance
 from collections import namedtuple
 import os
 import sys
+import csv
+import io
+
 
 DEFAULT_STATE_FILE = "~/tmux_state.txt"
 
@@ -13,10 +16,12 @@ Pane = namedtuple("Pane", "index window_index window_name cwd command session")
 
 def row_to_pane(row: str) -> Pane:
     """Make a Pane from a row in the state file"""
-    # unpack row, discard process ID from 6th element
-    (session, window_index, pane_index, window_name, cwd, _, command) = row.split(";")
-    pane = Pane(int(pane_index), int(window_index), window_name, cwd, command, session)
-    return pane
+    # unpack row, discard process ID (ppid) from 6th element
+    with io.StringIO(row) as si:
+        reader = csv.reader(si, delimiter=",")
+        (session, window_index, pane_index, window_name, cwd, _, command) = list(reader)[0]
+        pane = Pane(int(pane_index), int(window_index), window_name, cwd, command, session)
+        return pane
 
 
 def read_state_file(state_file: str = DEFAULT_STATE_FILE) -> dict:
