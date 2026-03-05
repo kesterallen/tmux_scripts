@@ -71,14 +71,14 @@ def read_state_file(state_file) -> defaultdict:
 
 
 def generate_commands(state: defaultdict):
-    tmux_commands = []
+    commands = []
     for session, panes in state.items():
-        # If a session already exists, exit with a warning
-        warning = f"session '{session}' already exists, quitting"
-        tmux_commands.append(
-            f"""has-session -t "{session}" && echo "{warning}" && exit 1"""
-        )
-        tmux_commands.append(f"""new-session -s "{session}" -d""")
+        # If a session already exists, this indicates tmux is already running,
+        # so don't stomp on that session , exit with a warning and let the user
+        # figure it out.
+        warning = f"Session '{session}' already exists, try to that. Quitting."
+        commands.append(f"""has-session -t "{session}" && echo "{warning}" && exit 1""")
+        commands.append(f"""new-session -s "{session}" -d""")
 
         for ipane, pane in enumerate(panes):
             # The pane should be split if its window index is different from
@@ -89,27 +89,28 @@ def generate_commands(state: defaultdict):
 
             # Rename the inital window created at session start
             if is_first_window:
-                tmux_command = f'rename-window "{pane.window_name}"'
+                command = f'rename-window "{pane.window_name}"'
             else:
                 # If a window contains multiple panes, create an additional pane here:
                 prev_pane = panes[ipane - 1]
                 is_split_pane = pane.window_index == prev_pane.window_index
                 if is_split_pane:
-                    tmux_command = f"split-window -t {session} -h"
-                # For the first pane of a new window, make the window,
-                # which implicitly creates the first pane:
+                    command = f"split-window -t {session} -h"
+                # For the first pane of a new window, creating the new window
+                # also creates the first pane:
                 else:
-                    tmux_command = f'new-window -n "{pane.window_name}" -t "{session}"'
-            tmux_commands.append(tmux_command)
+                    command = f'new-window -n "{pane.window_name}" -t "{session}"'
+
+            commands.append(command)
 
             sendkeys_args = f'-t "{session}:{pane.window_index}.{pane.pane_index}"'
-            tmux_commands.append(f"""send-keys {sendkeys_args} "cd '{pane.cwd}'" C-m""")
+            commands.append(f"""send-keys {sendkeys_args} "cd '{pane.cwd}'" C-m""")
             if pane.command:
-                tmux_commands.append(f'send-keys {sendkeys_args} "{pane.command}" C-m')
+                commands.append(f'send-keys {sendkeys_args} "{pane.command}" C-m')
 
-    tmux_commands.append(f'attach -t "{next(iter(state))}"')
+    commands.append(f'attach -t "{next(iter(state))}"')
 
-    return tmux_commands
+    return commands
 
 
 def main() -> None:
