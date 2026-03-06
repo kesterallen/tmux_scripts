@@ -1,5 +1,5 @@
 #  m   h  dom mon dow   command
-  */10 *  *   *   *   tmux list-s && (~/.virtualenv/testenv/bin/python ~/src/tmux_scripts/tmux_state.py record)
+  */10 *  *   *   *   tmux list-s && ~/.virtualenv/testenv/bin/python ~/src/tmux_scripts/tmux_state.py record
 
 # The tmux list-s lists all tmux sessions currently running. If there aren't any, nothing else happens.
 # If there is one or more tmux sessions running, each pane is listed in CSV rows with 
