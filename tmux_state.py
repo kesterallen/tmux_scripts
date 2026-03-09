@@ -26,62 +26,106 @@ from typing import ClassVar
 
 from pydantic import BaseModel
 
-OUTPUT_COMMAND_INDEX = -1  # ?
-SPLIT_CHAR = ";"
 RECORD = "record"
 RESTORE = "restore"
 
+FOREGROUND_COMMAND_INDEX = -1  # selects last child process; ignores suspended jobs
+TMUX_LIST_FORMAT_SEP = "|||"
+
+
+READ_INPUT = "read_input"
+WRITE_OUTPUT = "write_output"
+
 
 class Pane(BaseModel):
-    """
-    Lists of this object should be sorted by session_creation_time, window_index, pane_index
-    """
-    session_creation_time: str # linux epoch seconds
+    """Tmux pane info"""
+
+    session_creation_time: str  # linux epoch seconds
     session: str
     window_index: int
     pane_index: int
     window_name: str
     cwd: str
-    ppid: int
+    ppid: str
     command: str
 
-    # Class variables to list the panes. Note that the list format
-    # (list_command[2]) # must exactly correspond to Pane's instance variables
-    # (.sessions, .window_index, etc.) and be in the same order
-    list_command: ClassVar[list[str]] = [
-        "list-panes",
-        "-aF",
-        "#{session_created};#S;#I;#P;#W;#{pane_current_path};#{pane_pid}",
-    ]
-    ppid_index: ClassVar[int] = -1
+    # Maps each model field name (except `command`) to its tmux format token.
+    # This is the single source of truth linking Pane fields to tmux output.
+    TMUX_FORMAT_TOKENS: ClassVar[dict[str, str]] = {
+        "session_creation_time": "#{session_created}",
+        "session": "#S",
+        "window_index": "#I",
+        "pane_index": "#P",
+        "window_name": "#W",
+        "cwd": "#{pane_current_path}",
+        "ppid": "#{pane_pid}",
+        # `command` is excluded — added later from ps output
+    }
+
+    @classmethod
+    def get_list_command(cls) -> list[str]:
+        """Build the tmux list-panes command, deriving field order from model_fields."""
+        fmt = TMUX_LIST_FORMAT_SEP.join(
+            cls.TMUX_FORMAT_TOKENS[f]
+            for f in cls.model_fields
+            if f in cls.TMUX_FORMAT_TOKENS
+        )
+        return ["tmux", "list-panes", "-aF", fmt]
 
     @property
-    def i_sw(self):
+    def i_sw(self) -> str:
+        """syntactic sugar for the -t argument"""
         return f"{self.session}:{self.window_index}"
 
     @property
-    def i_swp(self):
+    def i_swp(self) -> str:
+        """syntactic sugar for the -t argument for split panes"""
         return f"{self.session}:{self.window_index}.{self.pane_index}"
 
     @classmethod
-    def from_row(cls, row: str) -> "Pane":
-        names = Pane.model_fields.keys()
+    def from_csv_row(cls, row: str) -> "Pane":
+        """Create an instance from a comma-delimited CSV row (saved state file)."""
+        names = cls.model_fields.keys()
         values = list(csv.reader([row]))[0]
-        assert len(names) == len(values)
+        command_not_specified = len(names) == len(values) + 1
+        if command_not_specified:
+            values.append("")
         model_data = {nv[0]: nv[1] for nv in zip(names, values)}
         return cls.model_validate(model_data)
 
+    @classmethod
+    def from_tmux_row(cls, row: str) -> "Pane":
+        """Create an instance from a tmux list-panes output row (no command field)."""
+        names = [f for f in cls.model_fields if f in cls.TMUX_FORMAT_TOKENS]
+        values = row.split(TMUX_LIST_FORMAT_SEP)
+        model_data = {nv[0]: nv[1] for nv in zip(names, values)}
+        model_data["command"] = ""
+        return cls.model_validate(model_data)
 
-def get_panes_from_file(lines) -> list:
+    def __lt__(self, other) -> bool:
+        """Comparator for sort"""
+        return (
+            int(self.session_creation_time),
+            int(self.window_index),
+            int(self.pane_index),
+        ) < (
+            int(other.session_creation_time),
+            int(other.window_index),
+            int(other.pane_index),
+        )
+
+
+def get_panes_from_file(lines) -> list[Pane]:
     """Parse Pane objects from an iterable of lines (file, stdin, etc.)."""
     pane_rows = [r.rstrip("\n") for r in lines if not r.startswith("#")]
-    panes = [Pane.from_row(row) for row in pane_rows if row]
+    panes = [Pane.from_csv_row(row) for row in pane_rows if row]
     if not panes:
         raise ValueError("No state found while parsing tmux state")
-    return sorted(panes, key=lambda p: (p.session_creation_time, int(p.window_index), int(p.pane_index)))
+    return sorted(panes)
 
 
-def generate_commands(panes: list[Pane]):
+def generate_commands(panes: list[Pane]) -> list[str]:
+    """Create a set of tmux commands from a list of Pane objects"""
     sessions_created = set()
     commands = []
     for ipane, pane in enumerate(panes):
@@ -92,43 +136,51 @@ def generate_commands(panes: list[Pane]):
         #
         # The pane should be split if its window index is different from
         # the previous pane's (this relies on the sorting of the panes list).
-        # The first pane ever can't be a split pane, and a split pane doesn't rename
-        # the window, so an if/else/if/else is used here.
+        # The first pane ever can't be a split pane, and a split pane doesn't
+        # rename the window, so an if/else/if/else is used here.
         #
         is_first_pane_in_session = pane.session not in sessions_created
         if is_first_pane_in_session:
             warning = f"session '{pane.session}' already exists, quitting"
-            commands.append(f'has-session -t "{pane.session}" 2> /dev/null && echo "{warning}" && exit 1')
+            commands.append(
+                f'tmux has-session -t "{pane.session}" 2> /dev/null '
+                f'&& echo "{warning}" && exit 1'
+            )
             sessions_created.add(pane.session)
 
-            command = f'new-session -s "{pane.session}" -n "{pane.window_name}" -d -c "{pane.cwd}"'
+            # Sleep 1: so that session_creation_time values are different for each
+            # session (ensures sessions are sorted by creation time)
+            commands.append("sleep 1")
+            command = f'tmux new-session -s "{pane.session}" -n "{pane.window_name}" -d'
             t_arg = f'-t "{pane.i_sw}"'
         else:
             # If this pane is in a new window, create that window (this also
             # the pane). If this pane is part of an existing window, split that
             # window to create the pane:
             #
+            prev = panes[ipane - 1]
             is_split_pane = (
-                pane.window_index == panes[ipane - 1].window_index
-                and pane.session == panes[ipane - 1].session
+                pane.window_index == prev.window_index and pane.session == prev.session
             )
             if is_split_pane:
-                command = f'split-window -t "{pane.i_sw}" -h -c "{pane.cwd}"'
+                command = f'tmux split-window -t "{pane.i_sw}" -h '
                 t_arg = f'-t "{pane.i_swp}"'
             else:
-                command = f'new-window -t "{pane.session}:" -n "{pane.window_name}" -c "{pane.cwd}"'
+                command = (
+                    f'tmux new-window -t "{pane.session}:" -n "{pane.window_name}"'
+                )
                 t_arg = f'-t "{pane.i_sw}"'
 
-        commands.append(command)
+        commands.append(command + f' -c "{pane.cwd}"')
         if pane.command:
-            commands.append(f'send-keys {t_arg} "{pane.command}" C-m')
+            commands.append(f'tmux send-keys {t_arg} "{pane.command}" C-m')
 
-    commands.append(f'attach -t "{panes[0].session}"')
+    commands.append(f'tmux attach -t "{panes[0].session}"')
 
     return commands
 
 
-def command_from_ppid(ppid: str, command_index: int = OUTPUT_COMMAND_INDEX) -> str:
+def command_from_ppid(ppid: str, command_index: int = FOREGROUND_COMMAND_INDEX) -> str:
     """
     Get the command corresponding to the PPID from #{pane_pid} in the tmux list-p
 
@@ -142,49 +194,30 @@ def command_from_ppid(ppid: str, command_index: int = OUTPUT_COMMAND_INDEX) -> s
     return command
 
 
-def list_tmux_panes() -> list[str]:
+def list_tmux_panes() -> list[Pane]:
     """Record current state"""
-    list_panes_cmd = ["tmux"] + Pane.list_command
-    list_panes_output = subprocess.run(list_panes_cmd, capture_output=True, check=False)
-    list_panes_output_rows = (
-        list_panes_output.stdout.decode("utf-8").rstrip().split("\n")
-    )
     panes = []
-    for pane_row in list_panes_output_rows:
-        pane = pane_row.rstrip().split(SPLIT_CHAR)
-        pane_command = command_from_ppid(ppid=pane[Pane.ppid_index])
-        pane.append(pane_command)
+    output = subprocess.run(Pane.get_list_command(), capture_output=True, text=True)
+    for row in output.stdout.rstrip().split("\n"):
+        pane = Pane.from_tmux_row(row)
+        pane.command = command_from_ppid(ppid=pane.ppid)
         panes.append(pane)
     return panes
 
 
 @contextlib.contextmanager
-def open_output(path=None):
-    """
-    Opens either a file or stdout for writing.
-    Used to ensure that CSV module usage is concise.
-    """
-    if path:
-        with open(path, "w") as f:
-            yield f
+def open_input_output(path=None, mode: str = READ_INPUT):
+    """Open either a file or STDIN/STDOUT for input/output"""
+    if path is None:
+        yield sys.stdin if mode == READ_INPUT else sys.stdout
     else:
-        yield sys.stdout
-
-
-@contextlib.contextmanager
-def open_input(path=None):
-    """
-    Opens either a file or stdin for reading.
-    Used to ensure that CSV module usage is concise.
-    """
-    if path:
-        with open(path, encoding="utf-8") as f:
+        mode_arg = "r" if mode == READ_INPUT else "w"
+        with open(path, mode=mode_arg, encoding="utf-8") as f:
             yield f
-    else:
-        yield sys.stdin
 
 
 def parse_args() -> argparse.Namespace:
+    """read in args: mode / state file"""
     parser = argparse.ArgumentParser(
         description="Record or restore tmux session state.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -195,7 +228,7 @@ def parse_args() -> argparse.Namespace:
         choices=[RECORD, RESTORE],
         nargs="?",
         default=RECORD,
-        help="Whether to record the current tmux state or restore from a state file (default: %(default)s)",
+        help="Record the current tmux state or restore one (default: %(default)s)",
     )
     parser.add_argument(
         "state_file",
@@ -212,19 +245,19 @@ def main() -> None:
     state_file = os.path.expanduser(args.state_file) if args.state_file else None
 
     if args.mode == RECORD:
-        tmux_panes = list_tmux_panes()
-        with open_output(state_file) as file:
-            csv.writer(file).writerows(tmux_panes)
+        panes = list_tmux_panes()
+        with open_input_output(state_file, WRITE_OUTPUT) as file:
+            csv.writer(file).writerows([p.model_dump().values() for p in panes])
 
-    if args.mode == RESTORE:
-        with open_input(state_file) as file:
+    elif args.mode == RESTORE:
+        with open_input_output(state_file, READ_INPUT) as file:
             panes = get_panes_from_file(file)
+
         print("set -e")
         for command in generate_commands(panes):
-            if "new-session" in command:
-                print(f"echo starting session: {command}")
-                print("sleep 1") # so that session_creation_time values are different for each session (ensures correct sort)
-            print(f"tmux {command}")
+            print(command)
+    else:
+        raise ValueError(f"mode {args.mode} not allowed")
 
 
 if __name__ == "__main__":
