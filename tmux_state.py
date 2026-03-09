@@ -30,7 +30,7 @@ RECORD = "record"
 RESTORE = "restore"
 
 FOREGROUND_COMMAND_INDEX = -1  # selects last child process; ignores suspended jobs
-TMUX_LIST_FORMAT_SEP = "|||"
+TMUX_LIST_FORMAT_SEP = "|||"  # TODO: switch this to https://stackoverflow.com/questions/8695118/what-are-the-file-group-record-unit-separator-control-characters-and-their-usage
 
 
 READ_INPUT = "read_input"
@@ -90,6 +90,7 @@ class Pane(BaseModel):
         command_not_specified = len(names) == len(values) + 1
         if command_not_specified:
             values.append("")
+        assert len(names) == len(values), "Names and Values don't match"
         model_data = {nv[0]: nv[1] for nv in zip(names, values)}
         return cls.model_validate(model_data)
 
@@ -99,8 +100,11 @@ class Pane(BaseModel):
         names = [f for f in cls.model_fields if f in cls.TMUX_FORMAT_TOKENS]
         values = row.split(TMUX_LIST_FORMAT_SEP)
         model_data = {nv[0]: nv[1] for nv in zip(names, values)}
-        model_data["command"] = ""
+        model_data["command"] = command_from_ppid(ppid=model_data["ppid"])
         return cls.model_validate(model_data)
+
+    def in_same_window(self, other: "Pane") -> bool:
+        return self.window_index == other.window_index and self.session == other.session
 
     def __lt__(self, other) -> bool:
         """Comparator for sort"""
@@ -151,27 +155,21 @@ def generate_commands(panes: list[Pane]) -> list[str]:
             # Sleep 1: so that session_creation_time values are different for each
             # session (ensures sessions are sorted by creation time)
             commands.append("sleep 1")
-            command = f'tmux new-session -s "{pane.session}" -n "{pane.window_name}" -d'
+            command = f'new-session -s "{pane.session}" -n "{pane.window_name}" -d'
             t_arg = f'-t "{pane.i_sw}"'
         else:
             # If this pane is in a new window, create that window (this also
             # the pane). If this pane is part of an existing window, split that
             # window to create the pane:
             #
-            prev = panes[ipane - 1]
-            is_split_pane = (
-                pane.window_index == prev.window_index and pane.session == prev.session
-            )
-            if is_split_pane:
-                command = f'tmux split-window -t "{pane.i_sw}" -h '
+            if pane.in_same_window(panes[ipane - 1]):
+                command = f'split-window -t "{pane.i_sw}" -h '
                 t_arg = f'-t "{pane.i_swp}"'
             else:
-                command = (
-                    f'tmux new-window -t "{pane.session}:" -n "{pane.window_name}"'
-                )
+                command = f'new-window -t "{pane.session}:" -n "{pane.window_name}"'
                 t_arg = f'-t "{pane.i_sw}"'
 
-        commands.append(command + f' -c "{pane.cwd}"')
+        commands.append(f'tmux {command} -c "{pane.cwd}"')
         if pane.command:
             commands.append(f'tmux send-keys {t_arg} "{pane.command}" C-m')
 
@@ -188,8 +186,8 @@ def command_from_ppid(ppid: str, command_index: int = FOREGROUND_COMMAND_INDEX) 
     e.g. one or more suspended jobs in the pane
     """
     ps_command = ["ps", "-hoargs", "--ppid", ppid]
-    ps_output = subprocess.run(ps_command, capture_output=True, check=False)
-    commands = ps_output.stdout.decode("utf-8").rstrip().split("\n")
+    ps_output = subprocess.run(ps_command, capture_output=True, check=False, text=True)
+    commands = ps_output.stdout.rstrip().split("\n")
     command = commands[command_index]
     return command
 
@@ -200,7 +198,6 @@ def list_tmux_panes() -> list[Pane]:
     output = subprocess.run(Pane.get_list_command(), capture_output=True, text=True)
     for row in output.stdout.rstrip().split("\n"):
         pane = Pane.from_tmux_row(row)
-        pane.command = command_from_ppid(ppid=pane.ppid)
         panes.append(pane)
     return panes
 
@@ -240,7 +237,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Read the state file and generate the recreate-the-state bash script."""
+    """
+    Read the state file and generate the recreate-the-state output, or read
+    such output and create a script to make the session.
+    """
     args = parse_args()
     state_file = os.path.expanduser(args.state_file) if args.state_file else None
 
