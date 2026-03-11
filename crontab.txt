@@ -5,9 +5,8 @@
 # If there is one or more tmux sessions running, each pane is listed in CSV rows with
 #     * session name
 #     * window index
-#     * pane ID
-#     * pane index
 #     * window name
+#     * pane ID
 #     * the current working directory in the pane
 #     * the ID of the process running in the pane, if there is one, otherwise an empty string
 #     * command of the process running in the pane, if there is one, otherwise an empty string
