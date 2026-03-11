@@ -2,10 +2,10 @@
   */10 *  *   *   *   tmux list-s && ~/.virtualenv/testenv/bin/python ~/src/tmux_scripts/tmux_state.py record ~/tmux_state.txt
 
 # The tmux list-s lists all tmux sessions currently running. If there aren't any, nothing else happens.
-# If there is one or more tmux sessions running, each pane is listed in CSV rows with 
-#     * session creation time (linux epoch seconds)
+# If there is one or more tmux sessions running, each pane is listed in CSV rows with
 #     * session name
 #     * window index
+#     * pane ID
 #     * pane index
 #     * window name
 #     * the current working directory in the pane
