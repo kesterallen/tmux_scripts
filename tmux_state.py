@@ -142,6 +142,7 @@ def get_panes_from_file(lines) -> list[Pane]:
 
 def generate_commands(panes: list[Pane]) -> list[str]:
     """Create a set of tmux commands from a list of Pane objects"""
+    # Check that these sessions don't already exist (prevents this script from creating double sessions):
     commands = ["set -e"] + [
         f"tmux has-session -t {q(s)} 2> /dev/null && "
         f'echo "session {q(s)} already exists, quitting" && exit 1'
@@ -151,16 +152,9 @@ def generate_commands(panes: list[Pane]) -> list[str]:
     sessions_created = set()
     for ipane, pane in enumerate(panes):
 
-        # Create a new session if it doesn't already exist and detach. If the
-        # session already exists, have add a bash command to a) warn the user,
-        # and b) exit before creating any new / duplicate sessions anything.
-        #
-        # Manually name the first sessions's inital window
-        #
-        # The pane should be split if its window index is different from
-        # the previous pane's (this relies on the Pane class's sorting __lt__).
-        # The first pane ever can't be a split pane, and a split pane doesn't
-        # rename the window, so an if/else/if/else is used here.
+        # If this pane's session doesn't exist yet, create it and manually name
+        # its first window.  Detach so future sessions don't nest inside this
+        # one.
         #
         is_first_pane_in_session = pane.session not in sessions_created
         if is_first_pane_in_session:
