@@ -23,7 +23,7 @@ import csv
 import enum
 import os
 
-# import shlex # TODO: add shlex.quote to pane.command?
+import shlex
 import subprocess
 import sys
 from typing import ClassVar
@@ -34,10 +34,15 @@ RECORD = "record"
 RESTORE = "restore"
 
 FOREGROUND_COMMAND_INDEX = -1  # selects last child process; ignores suspended jobs
-TMUX_LIST_FORMAT_SEP = "|||"  # TODO: switch to an invisible char like '\x1f'?
+TMUX_LIST_FORMAT_SEP = r"\x1f"  # unit separator char, use instead of something possibly used in the tmux list-panes output
+
+
+q = shlex.quote
 
 
 class IOMode(enum.Enum):
+    """Enum to handle user-specified IO mode (input or output)"""
+
     READ_INPUT = "read_input"
     WRITE_OUTPUT = "write_output"
 
@@ -48,7 +53,6 @@ class Pane(BaseModel):
     session: str
     window_index: int
     window_name: str
-    pane_index: int
     pane_id: str  # format is e.g. "%25". The prefix % is stripped in __lt__ for numeric sorting
     cwd: str
     ppid: str
@@ -60,7 +64,6 @@ class Pane(BaseModel):
         "session": "#S",
         "window_index": "#I",
         "window_name": "#W",
-        "pane_index": "#P",
         "pane_id": "#D",
         "cwd": "#{pane_current_path}",
         "ppid": "#{pane_pid}",
@@ -83,23 +86,19 @@ class Pane(BaseModel):
         return f"{self.session}:{self.window_index}"
 
     @classmethod
-    def from_csv_row(cls, row: str) -> "Pane":
-        """Create an instance from a comma-delimited CSV row (saved state file)."""
+    def from_csv_row(cls, row: list[str]) -> "Pane":
+        """Create an instance from a parsed CSV row (list of field values)."""
         names = list(cls.model_fields.keys())
-        values = list(csv.reader([row]))[0]
-        assert len(names) in (
-            len(values),
-            len(values) + 1,
-        ), "Names and Values don't match"
-        model_data = dict(zip(names, values))
-        return cls.model_validate(model_data)
+        if len(names) != len(row):
+            ValueError("Name and Value lists have different lengths. Quitting")
+        return cls.model_validate(dict(zip(names, row)))
 
     @classmethod
     def from_tmux_row(cls, row: str) -> "Pane":
         """Create an instance from a tmux list-panes output row (no command field)."""
         names = [f for f in cls.model_fields if f in cls.TMUX_FORMAT_TOKENS]
         values = row.split(TMUX_LIST_FORMAT_SEP)
-        model_data = {nv[0]: nv[1] for nv in zip(names, values)}
+        model_data = dict(zip(names, values))
         model_data["command"] = command_from_ppid(ppid=model_data["ppid"])
         return cls.model_validate(model_data)
 
@@ -107,20 +106,25 @@ class Pane(BaseModel):
         """Determine if these two panes are in the same window (to trigger a split)"""
         return self.window_index == other.window_index and self.session == other.session
 
+    @property
+    def sort_tuple(self) -> tuple:
+        """
+        The tuple to sort Pane by: pane ID (int, with leading '%' stripped),
+        then window index (int)
+        """
+        return int(self.pane_id[1:]), int(self.window_index)
+
     def __lt__(self, other) -> bool:
         """Comparator for sort"""
-        return (
-            int(self.pane_id[1:]),  # Strip leading % from pane id
-            int(self.window_index),
-        ) < (
-            int(other.pane_id[1:]),  # Strip leading % from pane id
-            int(other.window_index),
-        )
+        return self.sort_tuple < other.sort_tuple
 
 
-def sort_panes_by_session_then_pane_id(panes: list[Pane]) -> list[Pane]:
-    """Attempt to sort panes into session -> Pane ID, like the PREFIX-w
-    navigation tree shows"""
+def sort_by_session_appearance_order(panes: list[Pane]) -> list[Pane]:
+    """
+    Sort panes into the order reported by PREFIX-w navigation tree (preserving
+    'tmux list-panes' reported order): order of session creation, then order
+    of pane creation:
+    """
     session_order = {}
     for i, pane in enumerate(sorted(panes)):
         session_order.setdefault(pane.session, i)
@@ -129,18 +133,18 @@ def sort_panes_by_session_then_pane_id(panes: list[Pane]) -> list[Pane]:
 
 def get_panes_from_file(lines) -> list[Pane]:
     """Parse Pane objects from an iterable of lines (file, stdin, etc.)."""
-    pane_rows = [r.rstrip("\n") for r in lines if not r.startswith("#")]
-    panes = [Pane.from_csv_row(row) for row in pane_rows if row]
+    reader = csv.reader(line for line in lines if not line.startswith("#"))
+    panes = [Pane.from_csv_row(row) for row in reader if row]
     if not panes:
         raise ValueError("No state found while parsing tmux state")
-    return sort_panes_by_session_then_pane_id(panes)
+    return sort_by_session_appearance_order(panes)
 
 
 def generate_commands(panes: list[Pane]) -> list[str]:
     """Create a set of tmux commands from a list of Pane objects"""
     commands = ["set -e"] + [
-        f'tmux has-session -t "{s}" 2> /dev/null && '
-        f'echo "session {s} already exists, quitting" && exit 1'
+        f"tmux has-session -t {q(s)} 2> /dev/null && "
+        f'echo "session {q(s)} already exists, quitting" && exit 1'
         for s in set(p.session for p in panes)
     ]
 
@@ -154,33 +158,32 @@ def generate_commands(panes: list[Pane]) -> list[str]:
         # Manually name the first sessions's inital window
         #
         # The pane should be split if its window index is different from
-        # the previous pane's (this relies on the sorting of the panes list).
+        # the previous pane's (this relies on the Pane class's sorting __lt__).
         # The first pane ever can't be a split pane, and a split pane doesn't
         # rename the window, so an if/else/if/else is used here.
         #
         is_first_pane_in_session = pane.session not in sessions_created
         if is_first_pane_in_session:
             sessions_created.add(pane.session)
-            command = f'new-session -s "{pane.session}" -n "{pane.window_name}" -d'
-            t_arg = f'-t "{pane.i_sw}"'
+            command = f"new-session -s {q(pane.session)} -n {q(pane.window_name)} -d"
         else:
-            # If this pane is in a new window, create that window (this also
-            # the pane). If this pane is part of an existing window, split that
-            # window to create the pane:
+            # If this pane will be part of an existing window, split that
+            # window to create the pane. Otherwise, create a new window (which
+            # will contain the pane).
             #
-            # TODO: add shlex.quote to pane.command?
             if pane.in_same_window(panes[ipane - 1]):
-                command = f'split-window -t "{pane.i_sw}" -h '
-                t_arg = f'-t "{pane.i_sw}"'
+                command = f"split-window -t {q(pane.i_sw)} -h "
             else:
-                command = f'new-window -t "{pane.session}:" -n "{pane.window_name}"'
-                t_arg = f'-t "{pane.i_sw}"'
+                command = f"new-window -t {q(pane.session)}: -n {q(pane.window_name)}"
 
-        commands.append(f'tmux {command} -c "{pane.cwd}"')
+        commands.append(f"tmux {command} -c {q(pane.cwd)}")
         if pane.command:
-            commands.append(f'tmux send-keys {t_arg} "{pane.command}" C-m')
+            commands.append(
+                f"tmux send-keys -t {q(pane.i_sw)} -l {q(pane.command)} \\; "
+                f"send-keys -t {q(pane.i_sw)} Enter"
+            )
 
-    commands.append(f'tmux attach -t "{panes[0].session}"')
+    commands.append(f"tmux attach -t {q(panes[0].session)}")
 
     return commands
 
@@ -194,9 +197,8 @@ def command_from_ppid(ppid: str, command_index: int = FOREGROUND_COMMAND_INDEX) 
     """
     ps_command = ["ps", "-hoargs", "--ppid", ppid]
     ps_output = subprocess.run(ps_command, capture_output=True, check=False, text=True)
-    commands = ps_output.stdout.rstrip().split("\n")
-    command = commands[command_index]
-    return command
+    cmds = ps_output.stdout.rstrip().split("\n")
+    return cmds[command_index] if cmds else ""
 
 
 def list_tmux_panes() -> list[Pane]:
@@ -210,12 +212,12 @@ def list_tmux_panes() -> list[Pane]:
 
 
 @contextlib.contextmanager
-def open_input_output(path=None, mode: IOMode = IOMode.READ_INPUT):
+def open_input_output(path=None, io_mode: IOMode = IOMode.READ_INPUT):
     """Open either a file or STDIN/STDOUT for input/output"""
     if path is None:
-        yield sys.stdin if mode == IOMode.READ_INPUT else sys.stdout
+        yield sys.stdin if io_mode == IOMode.READ_INPUT else sys.stdout
     else:
-        mode_arg = "r" if mode == IOMode.READ_INPUT else "w"
+        mode_arg = "r" if io_mode == IOMode.READ_INPUT else "w"
         with open(path, mode=mode_arg, encoding="utf-8") as f:
             yield f
 

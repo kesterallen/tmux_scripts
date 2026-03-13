@@ -1,27 +1,31 @@
 import unittest
 from unittest.mock import patch, MagicMock
-from tmux_state import list_tmux_panes, Pane
+from tmux_state import list_tmux_panes, Pane, TMUX_LIST_FORMAT_SEP
+
+pane_fields = ["session", "window_index", "window_name", "pane_id", "cwd", "ppid"]
 
 class TestTmuxState(unittest.TestCase):
     @patch('subprocess.run')
     def test_list_tmux_panes(self, mock_subprocess):
         # Mock tmux list-panes output
-        mock_output = """session1|||0|||window1|||1|||%123|||/home/user|||12345"""
-        mock_subprocess.return_value = MagicMock(stdout=mock_output)
+        outputs = [
+            [ "session1", 0, "window1", "%123", "/home/user", "12345",],
+            [ "session1", 1, "window1", "%124", "/home/user", "12346",],
+        ]
+        mock_outputs = [ TMUX_LIST_FORMAT_SEP.join([str(e) for e in row]) for row in outputs ]
 
-        panes = list_tmux_panes()
+        for i, mock_output in enumerate(mock_outputs):
+            mock_subprocess.return_value = MagicMock(stdout=mock_output)
 
-        # Validate the parsed panes
-        self.assertEqual(len(panes), 1)
-        pane = panes[0]
-        self.assertIsInstance(pane, Pane)
-        self.assertEqual(pane.session, "session1")
-        self.assertEqual(pane.window_index, 0)
-        self.assertEqual(pane.window_name, "window1")
-        self.assertEqual(pane.pane_index, 1)
-        self.assertEqual(pane.pane_id, "%123")
-        self.assertEqual(pane.cwd, "/home/user")
-        self.assertEqual(pane.ppid, "12345")
+            panes = list_tmux_panes()
+
+            # Validate the parsed panes
+            self.assertEqual(len(panes), 1)
+            pane = panes[0]
+            self.assertIsInstance(pane, Pane)
+            for ifield, field in enumerate(pane_fields):
+                self.assertEqual(getattr(pane, field), outputs[i][ifield])
+
 
 if __name__ == '__main__':
     unittest.main()
