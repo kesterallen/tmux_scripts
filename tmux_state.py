@@ -3,26 +3,27 @@ Mode RECORD:
     Create a tmux state file, recording the current tmux session(s).
 
 Mode RESTORE:
-    Read a tmux_state.txt file and generate a script to recreate the tmux
+    Read a tmux_state.json file and generate a script to recreate the tmux
     session(s) for which the state files was recorded.
 
 Usage
     Either
-        python tmux_state.py record > tmux_state.csv
+        python tmux_state.py record > tmux_state.json
             or
-        python tmux_state.py record tmux_state.csv
+        python tmux_state.py record tmux_state.json
     or
-        python tmux_state.py restore tmux_state.csv
+        python tmux_state.py restore tmux_state.json
             or
-        cat tmux_state.csv | python tmux_state.py restore
+        cat tmux_state.json | python tmux_state.py restore
 """
 
 import argparse
+from collections import defaultdict
 import contextlib
-import csv
 import enum
+import io
+import json
 import os
-
 import shlex
 import subprocess
 import sys
@@ -33,8 +34,9 @@ from pydantic import BaseModel
 RECORD = "record"
 RESTORE = "restore"
 
-FOREGROUND_COMMAND_INDEX = -1  # selects last child process; ignores suspended jobs
-TMUX_LIST_FORMAT_SEP = r"\x1f"  # unit separator char, use instead of something possibly used in the tmux list-panes output
+# unit separator char, use instead of something possibly used in the tmux
+# list-panes output
+TMUX_LIST_FORMAT_SEP = r"\x1f"
 
 
 q = shlex.quote
@@ -55,10 +57,10 @@ class Pane(BaseModel):
     window_name: str
     pane_id: str  # format is e.g. "%25". The prefix % is stripped in __lt__ for numeric sorting
     cwd: str
-    ppid: str
-    command: str = ""
+    pane_pid: str
+    processes: dict = {"foreground": [], "background": []}
 
-    # Maps each model field name (except `command`) to its tmux format token.
+    # Maps each model field name (except `processes`) to its tmux format token.
     # This is the single source of truth linking Pane fields to tmux output.
     TMUX_FORMAT_TOKENS: ClassVar[dict[str, str]] = {
         "session": "#S",
@@ -66,12 +68,12 @@ class Pane(BaseModel):
         "window_name": "#W",
         "pane_id": "#D",
         "cwd": "#{pane_current_path}",
-        "ppid": "#{pane_pid}",
-        # `command` is excluded — added later from ps output
+        "pane_pid": "#{pane_pid}",  # "PID of first process in pane" (man tmux)
+        # `processes` is excluded — added later from ps output
     }
 
     @classmethod
-    def list_command(cls) -> list[str]:
+    def tmux_list_panes_command(cls) -> list[str]:
         """Build the tmux list-panes command, deriving field order from model_fields."""
         fmt = TMUX_LIST_FORMAT_SEP.join(
             cls.TMUX_FORMAT_TOKENS[f]
@@ -86,20 +88,13 @@ class Pane(BaseModel):
         return f"{self.session}:{self.window_index}"
 
     @classmethod
-    def from_csv_row(cls, row: list[str]) -> "Pane":
-        """Create an instance from a parsed CSV row (list of field values)."""
-        names = list(cls.model_fields.keys())
-        if len(names) != len(row):
-            ValueError("Name and Value lists have different lengths. Quitting")
-        return cls.model_validate(dict(zip(names, row)))
-
-    @classmethod
-    def from_tmux_row(cls, row: str) -> "Pane":
-        """Create an instance from a tmux list-panes output row (no command field)."""
+    def from_tmux_row(cls, row: str, processes: dict) -> "Pane":
+        """Create an instance from a tmux list-panes output row."""
         names = [f for f in cls.model_fields if f in cls.TMUX_FORMAT_TOKENS]
         values = row.split(TMUX_LIST_FORMAT_SEP)
         model_data = dict(zip(names, values))
-        model_data["command"] = command_from_ppid(ppid=model_data["ppid"])
+        if model_data["pane_pid"] in processes:
+            model_data["processes"] = processes[model_data["pane_pid"]]
         return cls.model_validate(model_data)
 
     def in_same_window(self, other: "Pane") -> bool:
@@ -121,9 +116,9 @@ class Pane(BaseModel):
 
 def sort_by_session_appearance_order(panes: list[Pane]) -> list[Pane]:
     """
-    Sort panes into the order reported by PREFIX-w navigation tree (preserving
-    'tmux list-panes' reported order): order of session creation, then order
-    of pane creation:
+    Sort panes into the order of the PREFIX-w navigation tree:
+        order of session creation, then
+        order of pane creation in that session
     """
     session_order = {}
     for i, pane in enumerate(sorted(panes)):
@@ -131,18 +126,20 @@ def sort_by_session_appearance_order(panes: list[Pane]) -> list[Pane]:
     return sorted(panes, key=lambda p: (session_order[p.session], p))
 
 
-def get_panes_from_file(lines) -> list[Pane]:
-    """Parse Pane objects from an iterable of lines (file, stdin, etc.)."""
-    reader = csv.reader(line for line in lines if not line.startswith("#"))
-    panes = [Pane.from_csv_row(row) for row in reader if row]
+def get_panes_from_file(file: io.TextIOWrapper) -> list[Pane]:
+    """Create Pane objects from an iterable of lines (file, stdin, etc.)."""
+    content = "".join(file)
+    raw = json.loads(content)
+    panes = [Pane.model_validate(item) for item in raw]
     if not panes:
         raise ValueError("No state found while parsing tmux state")
     return sort_by_session_appearance_order(panes)
 
 
-def generate_commands(panes: list[Pane]) -> list[str]:
+def generate_tmux_commands(panes: list[Pane]) -> list[str]:
     """Create a set of tmux commands from a list of Pane objects"""
-    # Check that these sessions don't already exist (prevents this script from creating double sessions):
+    # Initially, check that these sessions don't already exist (prevents this
+    # script from creating duplicates of running sessions):
     commands = ["set -e"] + [
         f"tmux has-session -t {q(s)} 2> /dev/null && "
         f'echo "session {q(s)} already exists, quitting" && exit 1'
@@ -171,37 +168,54 @@ def generate_commands(panes: list[Pane]) -> list[str]:
                 command = f"new-window -t {q(pane.session)}: -n {q(pane.window_name)}"
 
         commands.append(f"tmux {command} -c {q(pane.cwd)}")
-        if pane.command:
-            commands.append(
-                f"tmux send-keys -t {q(pane.i_sw)} -l {q(pane.command)} \\; "
-                f"send-keys -t {q(pane.i_sw)} Enter"
-            )
+        if pane.processes:
+            for foreground_background, processes in pane.processes.items():
+                suffix = " &" if foreground_background == "background" else ""
+                for process in processes:
+                    process += suffix
+                    commands.append(
+                        f"tmux send-keys -t {q(pane.i_sw)} -l {q(process)} \\; "
+                        f"send-keys -t {q(pane.i_sw)} Enter"
+                    )
 
     commands.append(f"tmux attach -t {q(panes[0].session)}")
 
     return commands
 
 
-def command_from_ppid(ppid: str, command_index: int = FOREGROUND_COMMAND_INDEX) -> str:
+def list_processes() -> dict:
     """
-    Get the command corresponding to the PPID from #{pane_pid} in the tmux list-p
-
-    Grab only the command_index-th PID output if there are multiple PIDs for this pane,
-    e.g. one or more suspended jobs in the pane
+    Get the commands running in all panes. Map them from pane.pane_pid (from
+    #{pane_pid} in the tmux list-p, the pid of the pane's bash session, which
+    will be the parent PID -- ppid -- of any commands running in the pane's
+    bash session) to STATE/COMMAND.
     """
-    ps_command = ["ps", "-hoargs", "--ppid", ppid]
+    # TODO map the pane.pane_id to the dict of processes? would need panes from calling method
+    ps_command = ["ps", "-hostat,ppid,args"]
     ps_output = subprocess.run(ps_command, capture_output=True, check=False, text=True)
-    cmds = ps_output.stdout.rstrip().split("\n")
-    return cmds[command_index] if cmds else ""
+    pses = [c.split(maxsplit=2) for c in ps_output.stdout.rstrip().split("\n")]
+
+    processes = defaultdict(
+        lambda: defaultdict(list, {"background": [], "foreground": []})
+    )
+    for stat, ppid, cmd in pses:
+        key = "foreground" if "+" in stat else "background"
+        processes[ppid][key].append(cmd)
+
+    return dict(processes)  # strips defaultdict extras
 
 
 def list_tmux_panes() -> list[Pane]:
-    """Record current state into a list of Pane objects"""
-    panes = []
-    output = subprocess.run(Pane.list_command(), capture_output=True, text=True)
-    for row in output.stdout.rstrip().split("\n"):
-        pane = Pane.from_tmux_row(row)
-        panes.append(pane)
+    """
+    Record current state from "tmux list-panes" (from
+    Pane.tmux_list_panes_command) into a list of Pane objects
+    """
+    output = subprocess.run(
+        Pane.tmux_list_panes_command(), capture_output=True, check=True, text=True
+    )
+    rows = output.stdout.rstrip().split("\n")
+    processes = list_processes()
+    panes = [Pane.from_tmux_row(r, processes) for r in rows]
     return panes
 
 
@@ -250,14 +264,12 @@ def main() -> None:
     if args.mode == RECORD:
         panes = list_tmux_panes()
         with open_input_output(state_file, IOMode.WRITE_OUTPUT) as file:
-            csv.writer(file).writerows([p.model_dump().values() for p in panes])
+            json.dump([p.model_dump() for p in panes], file, indent=4)
 
     elif args.mode == RESTORE:
         with open_input_output(state_file, IOMode.READ_INPUT) as file:
             panes = get_panes_from_file(file)
-
-        for command in generate_commands(panes):
-            print(command)
+        print("\n".join(generate_tmux_commands(panes)))
     else:
         raise ValueError(f"mode {args.mode} not allowed")
 
