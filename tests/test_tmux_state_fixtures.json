@@ -1,0 +1,18 @@
+[
+    {
+        "session": "session1",
+        "window_index": 0,
+        "window_name": "window1",
+        "pane_id": "%123",
+        "cwd": "/home/user",
+        "pane_pid": "12345"
+    },
+    {
+        "session": "session1",
+        "window_index": 1,
+        "window_name": "window1",
+        "pane_id": "%124",
+        "cwd": "/home/user",
+        "pane_pid": "12346"
+    }
+]
