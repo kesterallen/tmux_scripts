@@ -41,7 +41,6 @@ TMUX_LIST_FORMAT_SEP = r"\x1f"
 
 q = shlex.quote
 
-
 class IOMode(enum.Enum):
     """Enum to handle user-specified IO mode (input or output)"""
 
@@ -58,9 +57,9 @@ class Pane(BaseModel):
     pane_id: str  # format is e.g. "%25". The prefix % is stripped in __lt__ for numeric sorting
     cwd: str
     pane_pid: str
-    processes: dict = {"foreground": [], "background": []}
+    processes: list[str] = []
 
-    # Maps each model field name (except `processes`) to its tmux format token.
+    # Maps each model field name (except .processes) to its tmux format token.
     # This is the single source of truth linking Pane fields to tmux output.
     TMUX_FORMAT_TOKENS: ClassVar[dict[str, str]] = {
         "session": "#S",
@@ -69,7 +68,7 @@ class Pane(BaseModel):
         "pane_id": "#D",
         "cwd": "#{pane_current_path}",
         "pane_pid": "#{pane_pid}",  # "PID of first process in pane" (man tmux)
-        # `processes` is excluded — added later from ps output
+        # processes is excluded — added later from ps output
     }
 
     @classmethod
@@ -88,13 +87,14 @@ class Pane(BaseModel):
         return f"{self.session}:{self.window_index}"
 
     @classmethod
-    def from_tmux_row(cls, row: str, processes: dict) -> "Pane":
+    def from_tmux_row(cls, row: str, processes: dict[str: list]) -> "Pane":
         """Create an instance from a tmux list-panes output row."""
         names = [f for f in cls.model_fields if f in cls.TMUX_FORMAT_TOKENS]
         values = row.split(TMUX_LIST_FORMAT_SEP)
         model_data = dict(zip(names, values))
         if model_data["pane_pid"] in processes:
-            model_data["processes"] = processes[model_data["pane_pid"]]
+            pane_processes = processes[model_data["pane_pid"]]
+            model_data["processes"] = pane_processes
         return cls.model_validate(model_data)
 
     def in_same_window(self, other: "Pane") -> bool:
@@ -169,21 +169,18 @@ def generate_tmux_commands(panes: list[Pane]) -> list[str]:
 
         commands.append(f"tmux {command} -c {q(pane.cwd)}")
         if pane.processes:
-            for foreground_background, processes in pane.processes.items():
-                suffix = " &" if foreground_background == "background" else ""
-                for process in processes:
-                    process += suffix
-                    commands.append(
-                        f"tmux send-keys -t {q(pane.i_sw)} -l {q(process)} \\; "
-                        f"send-keys -t {q(pane.i_sw)} Enter"
-                    )
+            for process in pane.processes:
+                commands.append(
+                    f"tmux send-keys -t {q(pane.i_sw)} -l {q(process)} \\; "
+                    f"send-keys -t {q(pane.i_sw)} Enter"
+                )
 
     commands.append(f"tmux attach -t {q(panes[0].session)}")
 
     return commands
 
 
-def list_processes() -> dict:
+def list_processes() -> dict[str: list]:
     """
     Get the commands running in all panes. Map them from pane.pane_pid (from
     #{pane_pid} in the tmux list-p, the pid of the pane's bash session, which
@@ -195,12 +192,13 @@ def list_processes() -> dict:
     ps_output = subprocess.run(ps_command, capture_output=True, check=False, text=True)
     pses = [c.split(maxsplit=2) for c in ps_output.stdout.rstrip().split("\n")]
 
-    processes = defaultdict(
-        lambda: defaultdict(list, {"background": [], "foreground": []})
-    )
+    processes = defaultdict(list)
     for stat, ppid, cmd in pses:
-        key = "foreground" if "+" in stat else "background"
-        processes[ppid][key].append(cmd)
+        # Add a "&" suffix to background the command when it's replayed if it's
+        # backgrounded here (from stat):
+        if "+" not in stat:
+            cmd += " &"
+        processes[ppid].append(cmd)
 
     return dict(processes)  # strips defaultdict extras
 

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from tmux_state import list_tmux_panes, Pane, TMUX_LIST_FORMAT_SEP
 
-pane_fields = ["session", "window_index", "window_name", "pane_id", "cwd", "pane_pid"]
+pane_fields = ["session", "window_index", "window_name", "pane_id", "cwd", "pane_pid", "processes"]
 
 FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "test_tmux_state_fixtures.json")
 
