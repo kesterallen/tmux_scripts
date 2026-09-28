@@ -22,7 +22,6 @@ from collections import defaultdict
 import contextlib
 import enum
 import json
-from itertools import pairwise
 from pathlib import Path
 import psutil
 import shlex
@@ -35,8 +34,8 @@ from pydantic import BaseModel
 RECORD = "record"
 RESTORE = "restore"
 
-# unit separator char, use instead of something possibly used in the tmux
-# list-panes output
+# ASCII unit separator char. Use instead of something that might be used in the
+# tmux list-panes output
 TMUX_LIST_FORMAT_SEP = r"\x1f"
 
 
@@ -141,46 +140,63 @@ def get_panes_from_file(file: TextIO) -> list[Pane]:
 
 
 def generate_tmux_commands(panes: list[Pane]) -> list[str]:
-    """Create a set of tmux commands from a list of Pane objects"""
+    """Create a set of tmux commands from a list of Pane objects."""
     # Initially, check that these sessions don't already exist (prevents this
     # script from creating duplicates of running sessions):
     commands = ["set -e"] + [
         f"tmux has-session -t {q(s)} 2> /dev/null && "
         f'echo "session {q(s)} already exists, quitting" && exit 1'
-        for s in set(p.session for p in panes)
+        for s in {p.session for p in panes}
     ]
 
     def _send_keys(pane, process):
-        """Make the tmux send-keys command to restart the processes"""
-        send_keys_command = f"tmux send-keys -t {q(pane.i_sw)} -l {q(process)} \\; "
-        send_keys_command += f"send-keys -t {q(pane.i_sw)} Enter"
+        """Make the tmux send-keys command to restart the processes."""
+        send_keys_command = (
+            f"tmux send-keys -t {q(pane.i_sw)} -l {q(process)} \\; "
+            f"send-keys -t {q(pane.i_sw)} Enter"
+        )
         return send_keys_command
 
-    sessions_created = set()
-    first = panes[0]
-    # dummy initial pane to make pairwise work and generate good prevs
-    for prev, pane in pairwise([None] + panes):
-        # If this pane's session doesn't exist yet, create it and name its
-        # first window.  Detach so future sessions don't nest inside this one.
-        #
-        is_first_pane_in_session = pane.session not in sessions_created
-        if is_first_pane_in_session:
-            sessions_created.add(pane.session)
-            command = f"new-session -s {q(pane.session)} -n {q(pane.window_name)} -d"
-        else:
-            # If this pane will be part of an existing window, split that
-            # window to create the pane. Otherwise, create a new window (which
-            # will contain the pane).
-            #
-            if pane.in_same_window(prev):
-                command = f"split-window -t {q(pane.i_sw)} -h "
-            else:
-                command = f"new-window -t {q(pane.session)}: -n {q(pane.window_name)}"
+    # Group panes by session and then by window.  Window ordering must not
+    # depend on pane IDs: pane IDs reflect pane creation order and can have
+    # arbitrary relationships to window indexes.
+    sessions: dict[str, dict[int, list[Pane]]] = defaultdict(lambda: defaultdict(list))
+    session_order: list[str] = []
 
-        commands.append(f"tmux {command} -c {q(pane.cwd)}")
-        for process in pane.processes:
-            commands.append(_send_keys(pane, process))
-    commands.append(f"tmux attach -t {q(first.session)}")
+    for pane in panes:
+        if pane.session not in sessions:
+            session_order.append(pane.session)
+        sessions[pane.session][pane.window_index].append(pane)
+
+    for session in session_order:
+        windows = sessions[session]
+        window_indexes = sorted(windows)
+
+        for window_number in window_indexes:
+            window_panes = sorted(windows[window_number])
+
+            # The first window must be created by new-session. Subsequent
+            # windows are created explicitly, regardless of pane creation order.
+            first_pane = window_panes[0]
+
+            if window_number == window_indexes[0]:
+                command = f"new-session -s {q(session)} -n {q(first_pane.window_name)} -d"
+            else:
+                command = f"new-window -t {q(session)}: -n {q(first_pane.window_name)}"
+
+            commands.append(f"tmux {command} -c {q(first_pane.cwd)}")
+
+            for process in first_pane.processes:
+                commands.append(_send_keys(first_pane, process))
+
+            # The first pane already exists as a result of new-session/new-window.
+            # Every additional pane in this window is therefore a split.
+            for pane in window_panes[1:]:
+                commands.append(f"tmux split-window -t {q(pane.i_sw)} -h -c {q(pane.cwd)}")
+                for process in pane.processes:
+                    commands.append(_send_keys(pane, process))
+
+    commands.append(f"tmux attach -t {q(panes[0].session)}")
     return commands
 
 
